@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "877335468520",
+    "project_id": "aisulama",
+    "storage_bucket": "aisulama.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:877335468520:android:dfca21e0b94dccbc6cac5d",
+        "android_client_info": {
+          "package_name": "com.example.ai_sulama"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAII9VXruQC-fFAoUFhAD6qQxLeisYlOuA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
