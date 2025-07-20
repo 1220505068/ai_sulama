@@ -8,12 +8,14 @@ plugins {
 
 android {
     namespace = "com.example.ai_sulama"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+
     }
 
     kotlinOptions {
@@ -38,6 +40,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
 }
 
 flutter {
@@ -46,6 +49,7 @@ flutter {
 dependencies {
     // Import the Firebase BoM
     implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
 
     // TODO: Add the dependencies for Firebase products you want to use
