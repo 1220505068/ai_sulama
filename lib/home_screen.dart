@@ -1,55 +1,77 @@
 import 'package:flutter/material.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:device_info_plus/device_info_plus.dart'; // EKLENDİ
+import 'dart:io' show Platform; // EKLENDİ
+
 
 class IrrigationPredictor {
   late Interpreter _interpreter;
+  bool _isModelLoaded = false;
 
   Future<void> loadModel() async {
     try {
       _interpreter = await Interpreter.fromAsset('assets/model/irrigation_model.tflite');
+      _isModelLoaded = true;
+      print('Model başarıyla yüklendi.');
     } catch (e) {
+      _isModelLoaded = false;
       print('Model yüklenirken hata: $e');
+      throw Exception('Model yüklenemedi: $e');
     }
   }
 
+  bool get isModelReady => _isModelLoaded;
+
   String predictIrrigation(double humidity, double temperature, double ph) {
-    // Girdiyi normalize et (eğitimde kullanılan scaler ile aynı parametreler)
+    if (!_isModelLoaded) {
+      return "Model henüz yüklenmedi veya yüklenirken hata oluştu.";
+    }
     final input = [[
-      (humidity - 50) / 15,   // Ortalama=50, Std=15
-      (temperature - 22) / 5,  // Ortalama=22, Std=5
-      (ph - 6.5) / 0.5        // Ortalama=6.5, Std=0.5
+      (humidity - 50) / 15,
+      (temperature - 22) / 5,
+      (ph - 6.5) / 0.5
     ]];
-
-    // 1. Değişiklik: output listesini double elemanlarla başlatın
-    final output = List.filled(1 * 4, 0.0).reshape([1, 4]); // 0 yerine 0.0
-    _interpreter.run(input, output);
-
-    // 2. Değişiklik: output[0]'ı List<double>'a dönüştürün
-    // Modelden gelen çıktının List<dynamic> olabileceğini varsayalım
+    final output = List.filled(1 * 4, 0.0).reshape([1, 4]);
+    try {
+      _interpreter.run(input, output);
+    } catch (e) {
+      print('Model çalıştırılırken hata: $e');
+      return "Tahmin sırasında model hatası: $e";
+    }
     final List<dynamic> rawProbabilities = output[0];
-    final List<double> probabilities = rawProbabilities.map((e) => (e as num).toDouble()).toList();
-    // Alternatif olarak, eğer tüm elemanların zaten sayısal olduğu ve double'a
-    // dönüştürülebilir olduğu kesinse daha kısa bir yol:
-    // final List<double> probabilities = List<double>.from(output[0]);
+    final List<double> probabilities = rawProbabilities.map((e) {
+      if (e is num) {
+        return e.toDouble();
+      }
+      print('Model çıktısında beklenmeyen tür veya null değer: $e');
+      return 0.0;
+    }).toList();
 
-    // Ham çıktıları ve dönüştürülmüş olasılıkları yazdırmak hata ayıklamada yardımcı olabilir:
+    print('Ham model girdisi: $input');
     print('Ham model çıktısı (output[0]): $rawProbabilities');
     print('Dönüştürülmüş olasılıklar: $probabilities');
 
-    final prediction = probabilities.argmax(); // Şimdi probabilities List<double> türünde
-
+    if (probabilities.isEmpty) {
+      return "Tahmin yapılamadı (olasılıklar boş).";
+    }
+    final prediction = probabilities.argmax();
     switch(prediction) {
       case 0: return "Sulama gerekli değil";
       case 1: return "2 saat sonra sulama";
       case 2: return "1 saat sonra sulama";
       case 3: return "HEMEN SULAMA YAPIN";
-      default: return "Bilinmeyen durum";
+      default: return "Bilinmeyen tahmin sonucu";
     }
   }
 
-
   void dispose() {
-    _interpreter.close();
+    if (_isModelLoaded) {
+      _interpreter.close();
+      _isModelLoaded = false;
+      print('Model serbest bırakıldı.');
+    }
   }
 }
 
@@ -61,12 +83,11 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  late FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin;
   late IrrigationPredictor _predictor;
   String _predictionResult = "Model henüz çalıştırılmadı.";
-  bool _modelLoaded = false;
-  bool _isPredicting = false;
+  bool _isProcessing = false;
 
-  // Test için örnek değerler
   final double _sampleHumidity = 75.0;
   final double _sampleTemperature = 25.0;
   final double _samplePh = 6.0;
@@ -75,54 +96,196 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _predictor = IrrigationPredictor();
-    _loadModelAndPredictor();
+    _loadModel();
+    _initializeNotifications(); // Güncellenmiş metodu çağıracak
   }
 
-  Future<void> _loadModelAndPredictor() async {
-    await _predictor.loadModel();
-    // Model yüklendikten sonra UI'ı güncellemek için
-    if (mounted) {
-      setState(() {
-        _modelLoaded = true;
-        _predictionResult = "Model yüklendi. Tahmin için butona basın.";
-      });
+  // _initializeNotifications METODU GÜNCELLENDİ VE ASYNC YAPILDI
+  Future<void> _initializeNotifications() async {
+    flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+    if (Platform.isAndroid) {
+      final AndroidDeviceInfo androidInfo = await DeviceInfoPlugin().androidInfo;
+      if (androidInfo.version.sdkInt >= 33) { // Android 13 (API 33) ve üzeri
+        final bool? granted = await flutterLocalNotificationsPlugin
+            .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+            ?.requestNotificationsPermission();
+        print("Bildirim izni verildi: $granted");
+        if (granted == null || !granted) {
+          print("Kullanıcı bildirim iznini vermedi.");
+          // İsteğe bağlı: Kullanıcıya neden bildirimlerin önemli olduğunu açıklayan bir mesaj gösterilebilir.
+        }
+      }
+    }
+
+    const AndroidInitializationSettings initializationSettingsAndroid =
+    AndroidInitializationSettings('@mipmap/ic_launcher'); // İkonunuzun doğru olduğundan emin olun
+
+    const InitializationSettings initializationSettings = InitializationSettings(
+      android: initializationSettingsAndroid,
+      // iOS ayarları da buraya eklenebilir (gerekirse)
+    );
+
+    await flutterLocalNotificationsPlugin.initialize(
+      initializationSettings,
+      onDidReceiveNotificationResponse: (NotificationResponse notificationResponse) async {
+        final String? payload = notificationResponse.payload;
+        if (payload != null) {
+          print('notification payload: $payload');
+          // Payload'a göre farklı sayfalara yönlendirme vs. yapılabilir.
+        }
+      },
+    );
+    print("FlutterLocalNotificationsPlugin başlatıldı.");
+  }
+
+  Future<void> _loadModel() async {
+    setState(() {
+      _isProcessing = true;
+      _predictionResult = "Model yükleniyor...";
+    });
+    try {
+      await _predictor.loadModel();
+      if (mounted) {
+        setState(() {
+          _predictionResult = "Model yüklendi. Tahmin için bir buton seçin.";
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _predictionResult = "Model yüklenirken hata oluştu: ${e.toString()}";
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
     }
   }
 
-  Future<void> _runPrediction() async {
-    if (!_modelLoaded) {
+  // _showNotification METODU SINIF İÇİNE TAŞINDI
+  Future<void> _showNotification(String message) async {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics =
+    AndroidNotificationDetails(
+      'irrigation_channel', // kanal ID
+      'Sulama Bildirimleri', // kanal adı
+      channelDescription: 'Sulama zamanı bildirimleri', // kanal açıklaması
+      importance: Importance.max,
+      priority: Priority.high,
+      ticker: 'ticker',
+    );
+    const NotificationDetails platformChannelSpecifics =
+    NotificationDetails(android: androidPlatformChannelSpecifics);
+    await flutterLocalNotificationsPlugin.show(
+      0, // Bildirim ID
+      'Sulama Tahmini', // Bildirim başlığı
+      message, // Bildirim içeriği
+      platformChannelSpecifics,
+      payload: 'irrigation_payload', // Bildirime tıklandığında taşınacak veri
+    );
+    print("Bildirim gösterilmeye çalışıldı: $message");
+  }
+
+  Future<void> _runPredictionWithSampleData() async {
+    if (!_predictor.isModelReady) {
       setState(() {
-        _predictionResult = "Model henüz yüklenmedi!";
+        _predictionResult = "Model henüz hazır değil!";
       });
       return;
     }
-
     setState(() {
-      _isPredicting = true;
+      _isProcessing = true;
+      _predictionResult = "Örnek veriyle tahmin yapılıyor...";
     });
-
-    // Örnek girdi değerleri (bunları kullanıcıdan alabilir veya sensörlerden okuyabilirsiniz)
     try {
       final result = _predictor.predictIrrigation(
           _sampleHumidity, _sampleTemperature, _samplePh);
-      setState(() {
-        _predictionResult = "Tahmin: $result";
-      });
+      print("Tahmin sonucu: $result. Bildirim gönderiliyor...");
+      await _showNotification(result); // Artık sınıfın metodunu çağırıyor
+      if (mounted) {
+        setState(() {
+          _predictionResult = "Örnek Veriyle Tahmin: $result";
+        });
+      }
     } catch (e) {
-      setState(() {
-        _predictionResult = "Tahmin sırasında hata: $e";
-      });
-      print("Tahmin hatası: $e");
+      if (mounted) {
+        setState(() {
+          _predictionResult = "Örnek veriyle tahmin sırasında hata: $e";
+        });
+      }
+      print("Örnek veriyle tahmin hatası: $e");
     } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _fetchSensorDataAndPredict() async {
+    if (!_predictor.isModelReady) {
       setState(() {
-        _isPredicting = false;
+        _predictionResult = "Model henüz hazır değil!";
       });
+      return;
+    }
+    setState(() {
+      _isProcessing = true;
+      _predictionResult = "Firestore'dan veri alınıyor ve tahmin yapılıyor...";
+    });
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection("sensor_verileri")
+          .orderBy("timestamp", descending: true)
+          .limit(1)
+          .get();
+      if (snapshot.docs.isNotEmpty) {
+        final data = snapshot.docs.first.data();
+        final double humidity = (data["nem"] as num?)?.toDouble() ?? 0.0;
+        final double temperature = (data["sicaklik"] as num?)?.toDouble() ?? 0.0;
+        final double ph = (data["ph"] as num?)?.toDouble() ?? 0.0;
+        final result = _predictor.predictIrrigation(humidity, temperature, ph);
+
+        print("Firestore Tahmin sonucu: $result. Bildirim gönderiliyor...");
+        await _showNotification("Firestore Tahmini: $result (N:$humidity, S:$temperature, pH:$ph)");
+
+        if (mounted) {
+          setState(() {
+            _predictionResult =
+            "Firestore Verisiyle Tahmin: $result\n(Nem: $humidity, Sıcaklık: $temperature, pH: $ph)";
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _predictionResult = "Firestore'da sensör verisi bulunamadı.";
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _predictionResult = "Firestore'dan veri alırken veya tahmin yaparken hata: $e";
+        });
+      }
+      print("Firestore veri alma/tahmin hatası: $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
     }
   }
 
   @override
   void dispose() {
-    _predictor.dispose(); // Interpreter'ı serbest bırakmayı unutmayın
+    _predictor.dispose();
     super.dispose();
   }
 
@@ -130,7 +293,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Sulama Tahmini'),
+        title: const Text('Akıllı Sulama Tahmini'),
         centerTitle: true,
       ),
       body: Center(
@@ -139,32 +302,38 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Text(
-                'Örnek Veriler:\nNem: $_sampleHumidity%, Sıcaklık: $_sampleTemperature°C, pH: $_samplePh',
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16),
-              ),
+              if (_predictor.isModelReady)
+                Text(
+                  'Örnek Veriler (Test için):\nNem: $_sampleHumidity%, Sıcaklık: $_sampleTemperature°C, pH: $_samplePh',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 14, color: Colors.grey),
+                ),
               const SizedBox(height: 20),
-              if (!_modelLoaded)
+              if (_isProcessing)
                 const Column(
                   children: [
                     CircularProgressIndicator(),
                     SizedBox(height: 10),
-                    Text("Model yükleniyor..."),
                   ],
                 )
-              else if (_isPredicting)
-                const Column(
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 10),
-                    Text("Tahmin yapılıyor..."),
-                  ],
+              else if (!_predictor.isModelReady && !_isProcessing)
+                ElevatedButton(
+                  onPressed: _loadModel,
+                  child: const Text('Modeli Yüklemeyi Tekrar Dene'),
                 )
               else
-                ElevatedButton(
-                  onPressed: _runPrediction,
-                  child: const Text('Sulama Tahmini Yap'),
+                Column(
+                  children: [
+                    ElevatedButton(
+                      onPressed: _runPredictionWithSampleData,
+                      child: const Text('Örnek Veriyle Tahmin Yap'),
+                    ),
+                    const SizedBox(height: 10),
+                    ElevatedButton(
+                      onPressed: _fetchSensorDataAndPredict,
+                      child: const Text("Firestore'dan Veri Al ve Tahmin Yap"),
+                    ),
+                  ],
                 ),
               const SizedBox(height: 30),
               Text(
@@ -178,13 +347,14 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-}
+} // _HomeScreenState sınıfının kapanışı
 
-// Argmax extension'ı eklemeyi unutmayın (eğer yoksa)
+// Argmax extension'ı sınıf dışında kalabilir
 extension Argmax on List<double> {
   int argmax() {
     if (isEmpty) {
-      throw ArgumentError("List is empty");
+      print("Argmax için boş liste geldi.");
+      return -1;
     }
     double maxVal = this[0];
     int maxIdx = 0;
